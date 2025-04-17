@@ -19,7 +19,7 @@ Usage: $0 -i IP_ADDRESS [-s SETUP_SCRIPT] [--disable-2] [--disable-3] [--termina
   -s SETUP_SCRIPT   Absolute path on remote to the ROS2 setup.bash (default: $SETUP_SCRIPT)
   --disable-2       Disable the ROS2 launch in session 2 (opens terminal regardless)
   --disable-3       Disable the ROS2 launch in session 3 (opens terminal regardless)
-  --terminate       Kill existing screen sessions and close related gnome-terminals
+  --terminate       Kill all remote screen sessions and exit
   -h, --help        Show this help message and exit
 EOF
   exit 1
@@ -37,64 +37,57 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1"; usage;;
   esac
 done
-
 : "${IP_ADDRESS:?Error: -i IP_ADDRESS is required}"
 
 # --- dependency checks ---
 for cmd in sshpass screen gnome-terminal; do
   if ! command -v "$cmd" &>/dev/null; then
-    echo "Error: '$cmd' is required but not installed." >&2
-    exit 1
+    echo "Error: '$cmd' is required but not installed." >&2; exit 1
   fi
 done
 
-# SSH wrapper to avoid repeated password prompts
+# --- SSH command wrapper ---
 ssh_cmd() {
-  sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+  # usage: ssh_cmd remote_host remote_command
+  sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${IP_ADDRESS}" "$1"
 }
 
-# --- terminate previous screen and terminal sessions ---
+# --- terminate remote screens ---
 if $TERMINATE; then
-  echo "Terminating previous screen sessions and gnome terminals..."
-  # kill remote screen sessions uwb1, uwb2, uwb3
-  ssh_cmd ${SSH_USER}@${IP_ADDRESS} "screen -ls | awk '/uwb[123]/ {print \$1}' | xargs -r -n1 screen -S {} -X quit"
-  # kill local gnome-terminal windows with our titles
-  pkill -f "uwb[123]@${IP_ADDRESS}" || true
-  echo "All previous sessions terminated."
+  echo "Terminating all remote screen sessions..."
+  sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${IP_ADDRESS}" "pkill screen" || true
+  echo "All remote screen sessions terminated."
   exit 0
 fi
 
-# --- remote: start screen session only if not already running ---
+# --- check if remote screen exists ---
+screen_exists() {
+  sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${IP_ADDRESS}" \
+    "screen -ls | grep -E '^[[:space:]]*[0-9]+\.${1}[[:space:]]'" >/dev/null 2>&1
+}
+
+# --- start remote screen if missing ---
 remote_start_session() {
   local name="$1"; shift
-  local init_cmds="$*"
-
-  # skip if session already exists
-  if ssh_cmd ${SSH_USER}@${IP_ADDRESS} "screen -list | grep -q '[[:space:]]${name}[[:space:]]'"; then
-    echo "Remote screen session '${name}' already running."
+  local cmd="$*"
+  if screen_exists "$name"; then
+    echo "[INFO] Remote screen '$name' already exists. Skipping start."
   else
-    local remote_script="/tmp/init_${name}_$$.sh"
-    # prepare remote init script: sudo, source, commands, interactive shell
-    local content="echo '${SSH_PASS}' | sudo -S true; source ${SETUP_SCRIPT}; ${init_cmds}; exec bash"
-
-    ssh_cmd ${SSH_USER}@${IP_ADDRESS} "echo '${content}' > ${remote_script} && chmod +x ${remote_script}"
-    ssh_cmd ${SSH_USER}@${IP_ADDRESS} "screen -dmS ${name} bash -c '${remote_script}'"
-
-    echo "Remote screen session '${name}' started."
+    echo "[INFO] Starting remote screen '$name'..."
+    sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${IP_ADDRESS}" \
+      "screen -dmS ${name} bash -lc 'echo "${SSH_PASS}" | sudo -S true; source "${SETUP_SCRIPT}"; ${cmd}; exec bash'"
   fi
 }
 
-# --- local: open GNOME Terminal and attach to remote screen ---
+# --- open local terminal to attach remote screen ---
 open_terminal() {
   local name="$1"
-  gnome-terminal \
-    --title "${name}@${IP_ADDRESS}" \
-    -- bash -ic "sshpass -p '${SSH_PASS}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${IP_ADDRESS} 'screen -r ${name}' || bash; exec bash"
+  echo "[INFO] Opening terminal for '$name'..."
+  gnome-terminal --title "${name}@${IP_ADDRESS}" -- bash -ic "sshpass -p '${SSH_PASS}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${IP_ADDRESS} 'screen -x ${name} || screen -r ${name}'; exec bash"
 }
 
 # --- Session 1 ---
-remote_start_session uwb1 \
-  "cd /home/administrator/marius/uwb_ws/src/UWB-Jackal/uwb_scripts/rosbag_recorder"
+remote_start_session uwb1 "cd /home/administrator/marius/uwb_ws/src/UWB-Jackal/uwb_scripts/rosbag_recorder"
 open_terminal uwb1
 
 # --- Session 2 ---
@@ -113,5 +106,4 @@ else
 fi
 open_terminal uwb3
 
-
-echo "All requested sessions launched and interactive terminals opened."
+echo "All requested sessions are live and terminals opened."
